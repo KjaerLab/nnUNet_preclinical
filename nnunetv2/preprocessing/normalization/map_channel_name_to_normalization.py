@@ -2,9 +2,11 @@ from typing import Type
 
 from nnunetv2.preprocessing.normalization.default_normalization_schemes import CTNormalization, NoNormalization, \
     ZScoreNormalization, RescaleTo01Normalization, RGBTo01Normalization, ImageNormalization
+from nnunetv2.preprocessing.normalization.preclinical_normalization_schemes import CTNormalization_preclin
 
 channel_name_to_normalization_mapping = {
     'ct': CTNormalization,
+    'ct_preclin': CTNormalization_preclin,
     'nonorm': NoNormalization,
     'zscore': ZScoreNormalization,
     'rescale_to_0_1': RescaleTo01Normalization,
