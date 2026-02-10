@@ -161,7 +161,7 @@ class SpeedyPredictor(nnUNetPredictor):
                                             value_scaling_factor=10,
                                             device=results_device)
             else:
-                gaussian = 1
+                self.gaussian = 1
 
             if not self.allow_tqdm and self.verbose:
                 print(f'running prediction: {len(slicers)} steps')
@@ -178,7 +178,7 @@ class SpeedyPredictor(nnUNetPredictor):
                     if self.use_gaussian:
                         prediction *= self.gaussian
                     predicted_logits[sl] += prediction
-                    n_predictions[sl[1:]] += gaussian
+                    n_predictions[sl[1:]] += self.gaussian
                     queue.task_done()
                     pbar.update()
             queue.join()
