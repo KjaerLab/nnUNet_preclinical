@@ -31,7 +31,27 @@ from nnunetv2.inference.sliding_window_prediction import compute_gaussian, \
 
 class SpeedyPredictor(nnUNetPredictor):
 
-    gaussian_kernel = None
+    def __init__(self,
+                 tile_step_size: float = 0.5,
+                 use_gaussian: bool = True,
+                 use_mirroring: bool = True,
+                 perform_everything_on_device: bool = True,
+                 device: torch.device = torch.device('cuda'),
+                 verbose: bool = False,
+                 verbose_preprocessing: bool = False,
+                 allow_tqdm: bool = True):
+        
+        super().__init__(self,
+                 tile_step_size,
+                 use_gaussian,
+                 use_mirroring,
+                 perform_everything_on_device,
+                 device,
+                 verbose,
+                 verbose_preprocessing,
+                 allow_tqdm)
+
+        self.gaussian_kernel = None  # add new varible for only computing gaussian once
 
     def initialize_from_trained_model_folder(self, model_training_output_dir: str,
                                              use_folds: Union[Tuple[Union[int, str]], None],
