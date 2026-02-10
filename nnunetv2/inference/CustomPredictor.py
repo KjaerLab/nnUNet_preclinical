@@ -50,7 +50,7 @@ class SpeedyPredictor(nnUNetPredictor):
                  verbose_preprocessing,
                  allow_tqdm)
 
-        self.gaussian_kernel = None  # add new varible for only computing gaussian once
+        self.gaussian = None  # add new varible for only computing gaussian once
 
     def initialize_from_trained_model_folder(self, model_training_output_dir: str,
                                              use_folds: Union[Tuple[Union[int, str]], None],
