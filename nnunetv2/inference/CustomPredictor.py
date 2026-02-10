@@ -41,8 +41,7 @@ class SpeedyPredictor(nnUNetPredictor):
                  verbose_preprocessing: bool = False,
                  allow_tqdm: bool = True):
         
-        super().__init__(self,
-                 tile_step_size,
+        super().__init__(tile_step_size,
                  use_gaussian,
                  use_mirroring,
                  perform_everything_on_device,
