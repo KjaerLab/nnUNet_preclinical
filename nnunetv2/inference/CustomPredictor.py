@@ -110,7 +110,7 @@ class SpeedyPredictor(nnUNetPredictor):
             # The predictor's own predict_* methods use self.allowed_mirroring_axes
             # which for standard nnUNet configs follows directly from the dimensionality.
             # We replicate the trainer's logic here so we never touch the .pth file.
-            if configuration_manager.UNet_class_name in (
+            if configuration_manager.network_arch_class_name in (
                 "PlainConvUNet", "ResidualEncoderUNet",
                 # cover any 3D architecture
             ) or "3d" in configuration_name:
@@ -131,6 +131,14 @@ class SpeedyPredictor(nnUNetPredictor):
                 self.allowed_mirroring_axes = inference_allowed_mirroring_axes
 
             self.label_manager = plans_manager.get_label_manager(dataset_json)
+
+            ############################## Change allowed mirroring ###############################
+            if self.override_flip_axes:
+                self.allowed_mirroring_axes = self.override_flip_axes
+            else:
+                self.allowed_mirroring_axes = inference_allowed_mirroring_axes
+            #######################################################################################
+
             # torch.compile is not applicable to ScriptModules — skip it
             return
 
