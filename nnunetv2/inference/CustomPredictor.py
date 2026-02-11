@@ -333,7 +333,7 @@ class BatchedSpeedyPredictor(nnUNetPredictor):
             n_predictions = torch.zeros(data.shape[1:], dtype=torch.half, device=results_device)
 
             ###################################### Save gaussian to class variable #####################################
-            if self.use_gaussian and not self.gaussian:
+            if self.use_gaussian and self.gaussian is None:
                 self.gaussian = compute_gaussian(tuple(self.configuration_manager.patch_size), sigma_scale=1. / 8,
                                                  value_scaling_factor=10,
                                                  device=results_device)
@@ -360,11 +360,9 @@ class BatchedSpeedyPredictor(nnUNetPredictor):
                     with torch.autocast(self.device.type, enabled=True) if self.device.type == 'cuda' else dummy_context():
                         # [0] because it returns a tuple, usually (prediction, None)
                         prediction = self._internal_maybe_mirror_and_predict(batch)
-                        # --- CRITICAL FIX START ---
                         # Handle both Tuple (standard nnUNet) and Tensor (our override) returns
                         if isinstance(prediction, (tuple, list)):
                             prediction = prediction[0]
-                        # --- CRITICAL FIX END ---
                     
                     # Move prediction to result device (if different from GPU)
                     prediction = prediction.to(results_device)
@@ -411,35 +409,27 @@ class BatchedSpeedyPredictor(nnUNetPredictor):
         x: [Batch, Channels, Z, Y, X] (5D) or [Batch, Channels, Y, X] (4D)
         """
         mirror_axes = self.allowed_mirroring_axes if self.use_mirroring else None
-        
+
         # Initial forward pass
         prediction = self.network(x)
+        if isinstance(prediction, (tuple, list)):
+            prediction = prediction[0]
 
         if mirror_axes is not None:
-            # Spatial axes start after Batch and Channel dimensions (index 2 onwards)
-            # For 3D: Batch=0, Channel=1, Z=2, Y=3, X=4. Spatial axes = [2, 3, 4]
-            # For 2D: Batch=0, Channel=1, Y=2, X=3. Spatial axes = [2, 3]
-            
-            # Shift axes to start at 2
             actual_mirror_axes = [m + 2 for m in mirror_axes]
-            
-            # Generate all combinations of flips (e.g., X, Y, XY...)
+
             axes_combinations = [
-                c for i in range(len(actual_mirror_axes)) 
+                c for i in range(len(actual_mirror_axes))
                 for c in itertools.combinations(actual_mirror_axes, i + 1)
             ]
-            
+
             for axes in axes_combinations:
-                # 1. Flip input batch spatially
                 flipped_x = torch.flip(x, dims=axes)
-                
-                # 2. Predict on flipped batch
                 flipped_pred = self.network(flipped_x)
-                
-                # 3. Flip prediction back and accumulate
+                if isinstance(flipped_pred, (tuple, list)):
+                    flipped_pred = flipped_pred[0]
                 prediction += torch.flip(flipped_pred, dims=axes)
-                
-            # Average the predictions
+
             prediction /= (len(axes_combinations) + 1)
             
         return prediction
