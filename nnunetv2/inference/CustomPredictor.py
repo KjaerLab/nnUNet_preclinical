@@ -245,6 +245,18 @@ class BatchedSpeedyPredictor(SpeedyPredictor):
         predicted_logits = n_predictions = prediction = gaussian = batch = None
         results_device = self.device if do_on_device else torch.device('cpu')
 
+        def batch_producer(d, slh, batch_size, q):
+            """Background thread that pre-builds batches and transfers them to the compute device."""
+            for i in range(0, len(slh), batch_size):
+                batch_slicers = slh[i:i + batch_size]
+                # Build the batch tensor and move to device in the background thread.
+                # torch.clone with contiguous_format mirrors the original nnUNet producer pattern.
+                batch = torch.stack(
+                    [torch.clone(d[s], memory_format=torch.contiguous_format) for s in batch_slicers]
+                ).to(self.device)
+                q.put((batch, batch_slicers))
+            q.put('end')
+
         try:
             empty_cache(self.device)
 
@@ -252,6 +264,12 @@ class BatchedSpeedyPredictor(SpeedyPredictor):
             if self.verbose:
                 print(f'move image to device {results_device}')
             data = data.to(results_device)
+
+            # Set up the producer thread with a small queue (maxsize=2 allows 
+            # one batch to be ready while the current one is being processed)
+            queue = Queue(maxsize=2)
+            t = Thread(target=batch_producer, args=(data, slicers, self.batch_size, queue))
+            t.start()
 
             # preallocate results arrays
             if self.verbose:
@@ -273,23 +291,19 @@ class BatchedSpeedyPredictor(SpeedyPredictor):
             if not self.allow_tqdm and self.verbose:
                 print(f'running prediction: {len(slicers)} steps')
 
-            # BATCHED INFERENCE LOOP
+            # BATCHED INFERENCE LOOP (now consuming from the producer queue)
             with tqdm(desc=None, total=len(slicers), disable=not self.allow_tqdm) as pbar:
-                for i in range(0, len(slicers), self.batch_size):
-                    batch_slicers = slicers[i:i + self.batch_size]
-                    
-                    # Create batch
-                    # if data is on CPU, this moves slices to GPU. 
-                    # If data is on GPU, this stays on GPU.
-                    batch = torch.stack([data[s] for s in batch_slicers]).to(self.device)
+                while True:
+                    item = queue.get()
+                    if item == 'end':
+                        queue.task_done()
+                        break
+
+                    batch, batch_slicers = item
 
                     # Predict
-                    # We pass the batch to internal_maybe_mirror_and_predict. 
-                    # nnU-Net handles batches correctly in this method (flipping the whole batch).
                     with torch.autocast(self.device.type, enabled=True) if self.device.type == 'cuda' else dummy_context():
-                        # [0] because it returns a tuple, usually (prediction, None)
                         prediction = self._internal_maybe_mirror_and_predict(batch)
-                        # Handle both Tuple (standard nnUNet) and Tensor (our override) returns
                         if isinstance(prediction, (tuple, list)):
                             prediction = prediction[0]
                     
@@ -298,24 +312,21 @@ class BatchedSpeedyPredictor(SpeedyPredictor):
 
                     # Accumulate results
                     for j, sl in enumerate(batch_slicers):
-                        # sl is (slice(0, C), slice(Z), slice(Y), slice(X))
-                        # We need to ignore the Channel slice [0] and use only Spatial slices [1:]
                         spatial_slices = sl[1:] 
-                        
-                        # Construct a new slicer for the logits: (All Classes, Z, Y, X)
                         logit_slices = (slice(None), *spatial_slices)
 
                         pred_patch = prediction[j]
                         
                         if self.use_gaussian:
-                            # OUT-OF-PLACE multiplication to avoid zeroing small values
                             pred_patch = pred_patch * self.gaussian
                             
-                        # Write to the correct location
                         predicted_logits[logit_slices] += pred_patch
                         n_predictions[spatial_slices] += self.gaussian
 
+                    queue.task_done()
                     pbar.update(len(batch_slicers))
+
+            queue.join()
 
             # predicted_logits /= n_predictions
             torch.div(predicted_logits, n_predictions, out=predicted_logits)
@@ -331,6 +342,103 @@ class BatchedSpeedyPredictor(SpeedyPredictor):
             empty_cache(results_device)
             raise e
         return predicted_logits
+
+
+    # @torch.inference_mode()
+    # def _internal_predict_sliding_window_return_logits(self,
+    #                                                    data: torch.Tensor,
+    #                                                    slicers,
+    #                                                    do_on_device: bool = True,
+    #                                                    ):
+    #     predicted_logits = n_predictions = prediction = gaussian = batch = None
+    #     results_device = self.device if do_on_device else torch.device('cpu')
+
+    #     try:
+    #         empty_cache(self.device)
+
+    #         # move image to device
+    #         if self.verbose:
+    #             print(f'move image to device {results_device}')
+    #         data = data.to(results_device)
+
+    #         # preallocate results arrays
+    #         if self.verbose:
+    #             print(f'preallocating results arrays on device {results_device}')
+    #         predicted_logits = torch.zeros((self.label_manager.num_segmentation_heads, *data.shape[1:]),
+    #                                        dtype=torch.half,
+    #                                        device=results_device)
+    #         n_predictions = torch.zeros(data.shape[1:], dtype=torch.half, device=results_device)
+
+    #         ###################################### Save gaussian to class variable #####################################
+    #         if self.use_gaussian and self.gaussian is None:
+    #             self.gaussian = compute_gaussian(tuple(self.configuration_manager.patch_size), sigma_scale=1. / 8,
+    #                                              value_scaling_factor=10,
+    #                                              device=results_device)
+    #         elif not self.use_gaussian:
+    #             self.gaussian = 1
+    #         ############################################################################################################
+
+    #         if not self.allow_tqdm and self.verbose:
+    #             print(f'running prediction: {len(slicers)} steps')
+
+    #         # BATCHED INFERENCE LOOP
+    #         with tqdm(desc=None, total=len(slicers), disable=not self.allow_tqdm) as pbar:
+    #             for i in range(0, len(slicers), self.batch_size):
+    #                 batch_slicers = slicers[i:i + self.batch_size]
+                    
+    #                 # Create batch
+    #                 # if data is on CPU, this moves slices to GPU. 
+    #                 # If data is on GPU, this stays on GPU.
+    #                 batch = torch.stack([data[s] for s in batch_slicers]).to(self.device)
+
+    #                 # Predict
+    #                 # We pass the batch to internal_maybe_mirror_and_predict. 
+    #                 # nnU-Net handles batches correctly in this method (flipping the whole batch).
+    #                 with torch.autocast(self.device.type, enabled=True) if self.device.type == 'cuda' else dummy_context():
+    #                     # [0] because it returns a tuple, usually (prediction, None)
+    #                     prediction = self._internal_maybe_mirror_and_predict(batch)
+    #                     # Handle both Tuple (standard nnUNet) and Tensor (our override) returns
+    #                     if isinstance(prediction, (tuple, list)):
+    #                         prediction = prediction[0]
+                    
+    #                 # Move prediction to result device (if different from GPU)
+    #                 prediction = prediction.to(results_device)
+
+    #                 # Accumulate results
+    #                 for j, sl in enumerate(batch_slicers):
+    #                     # sl is (slice(0, C), slice(Z), slice(Y), slice(X))
+    #                     # We need to ignore the Channel slice [0] and use only Spatial slices [1:]
+    #                     spatial_slices = sl[1:] 
+                        
+    #                     # Construct a new slicer for the logits: (All Classes, Z, Y, X)
+    #                     logit_slices = (slice(None), *spatial_slices)
+
+    #                     pred_patch = prediction[j]
+                        
+    #                     if self.use_gaussian:
+    #                         # OUT-OF-PLACE multiplication to avoid zeroing small values
+    #                         pred_patch = pred_patch * self.gaussian
+                            
+    #                     # Write to the correct location
+    #                     predicted_logits[logit_slices] += pred_patch
+    #                     n_predictions[spatial_slices] += self.gaussian
+
+    #                 pbar.update(len(batch_slicers))
+
+    #         # predicted_logits /= n_predictions
+    #         torch.div(predicted_logits, n_predictions, out=predicted_logits)
+            
+    #         # check for infs
+    #         if torch.any(torch.isinf(predicted_logits)):
+    #             raise RuntimeError('Encountered inf in predicted array. Aborting... If this problem persists, '
+    #                                'reduce value_scaling_factor in compute_gaussian or increase the dtype of '
+    #                                'predicted_logits to fp32')
+    #     except Exception as e:
+    #         del predicted_logits, n_predictions, prediction, gaussian, batch
+    #         empty_cache(self.device)
+    #         empty_cache(results_device)
+    #         raise e
+    #     return predicted_logits
 
     # @torch.inference_mode()
     # def _internal_maybe_mirror_and_predict(self, x: torch.Tensor) -> torch.Tensor:
