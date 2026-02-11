@@ -27,6 +27,7 @@ from nnunetv2.utilities.find_class_by_name import recursive_find_python_class
 from nnunetv2.utilities.helpers import empty_cache, dummy_context
 from nnunetv2.inference.sliding_window_prediction import compute_gaussian, \
     compute_steps_for_sliding_window
+from nnunetv2.configuration import default_num_processes
 
 
 class SpeedyPredictor(nnUNetPredictor):
@@ -199,6 +200,34 @@ class SpeedyPredictor(nnUNetPredictor):
                 and not isinstance(self.network, OptimizedModule):
             print('Using torch.compile')
             self.network = torch.compile(self.network)
+
+    @torch.inference_mode()
+    def predict_logits_from_preprocessed_data(self, data: torch.Tensor) -> torch.Tensor:
+        n_threads = torch.get_num_threads()
+        torch.set_num_threads(default_num_processes if default_num_processes < n_threads else n_threads)
+        
+        if self.list_of_parameters is None:
+            # TorchScript model — weights are baked in, just run inference once
+            prediction = self.predict_sliding_window_return_logits(data).to('cpu')
+        else:
+            # Standard checkpoint path — original behavior
+            prediction = None
+            for params in self.list_of_parameters:
+                if not isinstance(self.network, OptimizedModule):
+                    self.network.load_state_dict(params)
+                else:
+                    self.network._orig_mod.load_state_dict(params)
+                if prediction is None:
+                    prediction = self.predict_sliding_window_return_logits(data).to('cpu')
+                else:
+                    prediction += self.predict_sliding_window_return_logits(data).to('cpu')
+            if len(self.list_of_parameters) > 1:
+                prediction /= len(self.list_of_parameters)
+
+        if self.verbose:
+            print('Prediction done')
+        torch.set_num_threads(n_threads)
+        return prediction
 
     @torch.inference_mode()
     def _internal_predict_sliding_window_return_logits(self,
