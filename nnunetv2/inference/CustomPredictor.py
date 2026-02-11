@@ -216,8 +216,9 @@ class BatchedSpeedyPredictor(nnUNetPredictor):
                  verbose: bool = False,
                  verbose_preprocessing: bool = False,
                  allow_tqdm: bool = True, 
-                 only_zy_flips: bool = True,
-                 batch_size: int = 4):
+                 override_flip_axes: tuple = (0,2),  # set to None to bypass
+                 batch_size: int = 4,
+                 compile: bool = True):
         
         super().__init__(tile_step_size,
                  use_gaussian,
@@ -228,9 +229,10 @@ class BatchedSpeedyPredictor(nnUNetPredictor):
                  verbose_preprocessing,
                  allow_tqdm)
 
-        self.only_zy_flips = only_zy_flips
+        self.override_flip_axes = override_flip_axes
         self.gaussian = None  # add new varible for only computing gaussian once
         self.batch_size = batch_size
+        self.compile = compile
 
     def initialize_from_trained_model_folder(self, model_training_output_dir: str,
                                              use_folds: Union[Tuple[Union[int, str]], None],
@@ -293,18 +295,18 @@ class BatchedSpeedyPredictor(nnUNetPredictor):
         self.trainer_name = trainer_name
 
         ############################## Change allowed mirroring ###############################
-        if self.only_zy_flips:
-            self.allowed_mirroring_axes = [0,2]
+        if self.override_flip_axes:
+            self.allowed_mirroring_axes = self.override_flip_axes
         else:
             self.allowed_mirroring_axes = inference_allowed_mirroring_axes 
         #######################################################################################
 
 
         self.label_manager = plans_manager.get_label_manager(dataset_json)
-        if ('nnUNet_compile' in os.environ.keys()) and (os.environ['nnUNet_compile'].lower() in ('true', '1', 't')) \
+        if ((('nnUNet_compile' in os.environ.keys()) and (os.environ['nnUNet_compile'].lower() in ('true', '1', 't'))) or self.compile) \
                 and not isinstance(self.network, OptimizedModule):
             print('Using torch.compile')
-            self.network = torch.compile(self.network)
+            self.network = torch.compile(self.network, mode="max-autotune")
 
 
     @torch.inference_mode()
