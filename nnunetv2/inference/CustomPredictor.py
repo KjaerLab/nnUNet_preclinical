@@ -40,7 +40,8 @@ class SpeedyPredictor(nnUNetPredictor):
                  verbose: bool = False,
                  verbose_preprocessing: bool = False,
                  allow_tqdm: bool = True, 
-                 only_zy_flips: bool = True):
+                 override_flip_axes: tuple = (0,2),  # set to None to bypass
+                 compile: bool = False):
         
         super().__init__(tile_step_size,
                  use_gaussian,
@@ -51,7 +52,8 @@ class SpeedyPredictor(nnUNetPredictor):
                  verbose_preprocessing,
                  allow_tqdm)
 
-        self.only_zy_flips = only_zy_flips
+        self.override_flip_axes = override_flip_axes
+        self.compile = compile
         self.gaussian = None  # add new varible for only computing gaussian once
 
     def initialize_from_trained_model_folder(self, model_training_output_dir: str,
@@ -115,8 +117,8 @@ class SpeedyPredictor(nnUNetPredictor):
         self.trainer_name = trainer_name
 
         ############################## Change allowed mirroring ###############################
-        if self.only_zy_flips:
-            self.allowed_mirroring_axes = [0,1]
+        if self.override_flip_axes:
+            self.allowed_mirroring_axes = self.override_flip_axes
         else:
             self.allowed_mirroring_axes = inference_allowed_mirroring_axes 
         #######################################################################################
@@ -205,7 +207,7 @@ class SpeedyPredictor(nnUNetPredictor):
         return predicted_logits
 
 
-class BatchedSpeedyPredictor(nnUNetPredictor):
+class BatchedSpeedyPredictor(SpeedyPredictor):
 
     def __init__(self,
                  tile_step_size: float = 0.5,
@@ -217,8 +219,8 @@ class BatchedSpeedyPredictor(nnUNetPredictor):
                  verbose_preprocessing: bool = False,
                  allow_tqdm: bool = True, 
                  override_flip_axes: tuple = (0,2),  # set to None to bypass
-                 batch_size: int = 4,
-                 compile: bool = True):
+                 compile: bool = False,
+                 batch_size: int = 4):
         
         super().__init__(tile_step_size,
                  use_gaussian,
@@ -227,87 +229,12 @@ class BatchedSpeedyPredictor(nnUNetPredictor):
                  device,
                  verbose,
                  verbose_preprocessing,
-                 allow_tqdm)
+                 allow_tqdm, 
+                 override_flip_axes,
+                 compile)
 
-        self.override_flip_axes = override_flip_axes
         self.gaussian = None  # add new varible for only computing gaussian once
         self.batch_size = batch_size
-        self.compile = compile
-
-    def initialize_from_trained_model_folder(self, model_training_output_dir: str,
-                                             use_folds: Union[Tuple[Union[int, str]], None],
-                                             checkpoint_name: str = 'checkpoint_final.pth'):
-        """
-        This is used when making predictions with a trained model
-        """
-        if use_folds is None:
-            use_folds = nnUNetPredictor.auto_detect_available_folds(model_training_output_dir, checkpoint_name)
-
-        dataset_json = load_json(join(model_training_output_dir, 'dataset.json'))
-        plans = load_json(join(model_training_output_dir, 'plans.json'))
-        plans_manager = PlansManager(plans)
-
-        if isinstance(use_folds, str):
-            use_folds = [use_folds]
-
-        parameters = []
-        for i, f in enumerate(use_folds):
-            f = int(f) if f != 'all' else f
-            checkpoint = torch.load(join(model_training_output_dir, f'fold_{f}', checkpoint_name),
-                                    map_location=torch.device('cpu'), weights_only=False)
-            if i == 0:
-                trainer_name = checkpoint['trainer_name']
-                configuration_name = checkpoint['init_args']['configuration']
-                inference_allowed_mirroring_axes = checkpoint['inference_allowed_mirroring_axes'] if \
-                    'inference_allowed_mirroring_axes' in checkpoint.keys() else None
-
-            parameters.append(checkpoint['network_weights'])
-
-        configuration_manager = plans_manager.get_configuration(configuration_name)
-        # restore network
-        num_input_channels = determine_num_input_channels(plans_manager, configuration_manager, dataset_json)
-        trainer_class = recursive_find_python_class(join(nnunetv2.__path__[0], "training", "nnUNetTrainer"),
-                                                    trainer_name, 'nnunetv2.training.nnUNetTrainer')
-        if trainer_class is None:
-            print(f'WARNING: Unable to locate trainer class {trainer_name} in nnunetv2.training.nnUNetTrainer. '
-                               f'Please place it there (in any .py file)!\nDefault to nnUNetTrainer')
-            trainer_name = "nnUNetTrainer"
-            
-        network = trainer_class.build_network_architecture(
-            configuration_manager.network_arch_class_name,
-            configuration_manager.network_arch_init_kwargs,
-            configuration_manager.network_arch_init_kwargs_req_import,
-            num_input_channels,
-            plans_manager.get_label_manager(dataset_json).num_segmentation_heads,
-            enable_deep_supervision=False
-        )
-
-        self.plans_manager = plans_manager
-        self.configuration_manager = configuration_manager
-        self.list_of_parameters = parameters
-
-        # initialize network with first set of parameters, also see https://github.com/MIC-DKFZ/nnUNet/issues/2520
-        network.load_state_dict(parameters[0])
-
-        self.network = network
-
-        self.dataset_json = dataset_json
-        self.trainer_name = trainer_name
-
-        ############################## Change allowed mirroring ###############################
-        if self.override_flip_axes:
-            self.allowed_mirroring_axes = self.override_flip_axes
-        else:
-            self.allowed_mirroring_axes = inference_allowed_mirroring_axes 
-        #######################################################################################
-
-
-        self.label_manager = plans_manager.get_label_manager(dataset_json)
-        if ((('nnUNet_compile' in os.environ.keys()) and (os.environ['nnUNet_compile'].lower() in ('true', '1', 't'))) or self.compile) \
-                and not isinstance(self.network, OptimizedModule):
-            print('Using torch.compile')
-            self.network = torch.compile(self.network, mode="max-autotune")
-
 
     @torch.inference_mode()
     def _internal_predict_sliding_window_return_logits(self,
@@ -405,33 +332,33 @@ class BatchedSpeedyPredictor(nnUNetPredictor):
             raise e
         return predicted_logits
 
-    @torch.inference_mode()
-    def _internal_maybe_mirror_and_predict(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        x: [Batch, Channels, Z, Y, X] (5D) or [Batch, Channels, Y, X] (4D)
-        """
-        mirror_axes = self.allowed_mirroring_axes if self.use_mirroring else None
+    # @torch.inference_mode()
+    # def _internal_maybe_mirror_and_predict(self, x: torch.Tensor) -> torch.Tensor:
+    #     """
+    #     x: [Batch, Channels, Z, Y, X] (5D) or [Batch, Channels, Y, X] (4D)
+    #     """
+    #     mirror_axes = self.allowed_mirroring_axes if self.use_mirroring else None
 
-        # Initial forward pass
-        prediction = self.network(x)
-        if isinstance(prediction, (tuple, list)):
-            prediction = prediction[0]
+    #     # Initial forward pass
+    #     prediction = self.network(x)
+    #     if isinstance(prediction, (tuple, list)):
+    #         prediction = prediction[0]
 
-        if mirror_axes is not None:
-            actual_mirror_axes = [m + 2 for m in mirror_axes]
+    #     if mirror_axes is not None:
+    #         actual_mirror_axes = [m + 2 for m in mirror_axes]
 
-            axes_combinations = [
-                c for i in range(len(actual_mirror_axes))
-                for c in itertools.combinations(actual_mirror_axes, i + 1)
-            ]
+    #         axes_combinations = [
+    #             c for i in range(len(actual_mirror_axes))
+    #             for c in itertools.combinations(actual_mirror_axes, i + 1)
+    #         ]
 
-            for axes in axes_combinations:
-                flipped_x = torch.flip(x, dims=axes)
-                flipped_pred = self.network(flipped_x)
-                if isinstance(flipped_pred, (tuple, list)):
-                    flipped_pred = flipped_pred[0]
-                prediction += torch.flip(flipped_pred, dims=axes)
+    #         for axes in axes_combinations:
+    #             flipped_x = torch.flip(x, dims=axes)
+    #             flipped_pred = self.network(flipped_x)
+    #             if isinstance(flipped_pred, (tuple, list)):
+    #                 flipped_pred = flipped_pred[0]
+    #             prediction += torch.flip(flipped_pred, dims=axes)
 
-            prediction /= (len(axes_combinations) + 1)
+    #         prediction /= (len(axes_combinations) + 1)
             
-        return prediction
+    #     return prediction
