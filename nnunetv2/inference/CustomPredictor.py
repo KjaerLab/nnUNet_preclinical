@@ -60,7 +60,10 @@ class SpeedyPredictor(nnUNetPredictor):
                                              use_folds: Union[Tuple[Union[int, str]], None],
                                              checkpoint_name: str = 'checkpoint_final.pth'):
         """
-        This is used when making predictions with a trained model
+        This is used when making predictions with a trained model.
+        Supports loading from TorchScript (.pt) if a traced model exists in the fold directory.
+        When a TorchScript model is found, the heavy .pth checkpoint is never loaded — all
+        metadata is derived from the folder name and plans.json instead.
         """
         if use_folds is None:
             use_folds = nnUNetPredictor.auto_detect_available_folds(model_training_output_dir, checkpoint_name)
@@ -72,11 +75,71 @@ class SpeedyPredictor(nnUNetPredictor):
         if isinstance(use_folds, str):
             use_folds = [use_folds]
 
+        # ── Try loading a TorchScript model ──────────────────────────────────
+        # Only supported for single-fold (weights are baked into the traced model).
+        torchscript_path = None
+        if len(use_folds) == 1:
+            f = use_folds[0]
+            f = int(f) if f != 'all' else f
+            candidate = join(model_training_output_dir, f'fold_{f}', 'model_traced.pt')
+            if isfile(candidate):
+                torchscript_path = candidate
+
+        if torchscript_path is not None:
+            print(f"Loading TorchScript model from {torchscript_path}")
+            network = torch.jit.load(torchscript_path, map_location=self.device)
+            network.eval()
+
+            # ── Derive metadata from the folder name ────────────────────────
+            # Folder structure: .../DatasetXXX_Name/TrainerName__PlansName__ConfigName
+            # e.g. "nnUNetTrainer_2000epochs__nnUNetResEncUNetMPlans__3d_fullres"
+            folder_name = os.path.basename(model_training_output_dir)
+            parts = folder_name.split('__')
+            assert len(parts) == 3, (
+                f"Expected folder name format 'TrainerName__PlansName__ConfigName', "
+                f"but got '{folder_name}' ({len(parts)} parts). Cannot infer metadata "
+                f"without loading the checkpoint."
+            )
+            trainer_name = parts[0]          # e.g. "nnUNetTrainer_2000epochs"
+            # parts[1] is the plans name   — already loaded from plans.json
+            configuration_name = parts[2]    # e.g. "3d_fullres"
+
+            configuration_manager = plans_manager.get_configuration(configuration_name)
+
+            # Mirroring axes are determined by the configuration, not the checkpoint.
+            # The predictor's own predict_* methods use self.allowed_mirroring_axes
+            # which for standard nnUNet configs follows directly from the dimensionality.
+            # We replicate the trainer's logic here so we never touch the .pth file.
+            if configuration_manager.UNet_class_name in (
+                "PlainConvUNet", "ResidualEncoderUNet",
+                # cover any 3D architecture
+            ) or "3d" in configuration_name:
+                inference_allowed_mirroring_axes = (0, 1, 2)
+            else:
+                inference_allowed_mirroring_axes = (0, 1)
+
+            self.plans_manager = plans_manager
+            self.configuration_manager = configuration_manager
+            self.list_of_parameters = None  # weights are baked into the traced model
+            self.network = network
+            self.dataset_json = dataset_json
+            self.trainer_name = trainer_name
+
+            if self.override_flip_axes:
+                self.allowed_mirroring_axes = self.override_flip_axes
+            else:
+                self.allowed_mirroring_axes = inference_allowed_mirroring_axes
+
+            self.label_manager = plans_manager.get_label_manager(dataset_json)
+            # torch.compile is not applicable to ScriptModules — skip it
+            return
+
+        # ── Regular checkpoint loading (original path) ───────────────────────
         parameters = []
         for i, f in enumerate(use_folds):
             f = int(f) if f != 'all' else f
             checkpoint = torch.load(join(model_training_output_dir, f'fold_{f}', checkpoint_name),
-                                    map_location=torch.device('cpu'), weights_only=False)
+                                    map_location=torch.device('cpu'), weights_only=False, mmap=True)
             if i == 0:
                 trainer_name = checkpoint['trainer_name']
                 configuration_name = checkpoint['init_args']['configuration']
@@ -92,9 +155,9 @@ class SpeedyPredictor(nnUNetPredictor):
                                                     trainer_name, 'nnunetv2.training.nnUNetTrainer')
         if trainer_class is None:
             print(f'WARNING: Unable to locate trainer class {trainer_name} in nnunetv2.training.nnUNetTrainer. '
-                               f'Please place it there (in any .py file)!\nDefault to nnUNetTrainer')
+                            f'Please place it there (in any .py file)!\nDefault to nnUNetTrainer')
             trainer_name = "nnUNetTrainer"
-            
+
         network = trainer_class.build_network_architecture(
             configuration_manager.network_arch_class_name,
             configuration_manager.network_arch_init_kwargs,
@@ -120,9 +183,8 @@ class SpeedyPredictor(nnUNetPredictor):
         if self.override_flip_axes:
             self.allowed_mirroring_axes = self.override_flip_axes
         else:
-            self.allowed_mirroring_axes = inference_allowed_mirroring_axes 
+            self.allowed_mirroring_axes = inference_allowed_mirroring_axes
         #######################################################################################
-
 
         self.label_manager = plans_manager.get_label_manager(dataset_json)
         if ('nnUNet_compile' in os.environ.keys()) and (os.environ['nnUNet_compile'].lower() in ('true', '1', 't')) \
@@ -267,7 +329,7 @@ class BatchedSpeedyPredictor(SpeedyPredictor):
 
             # Set up the producer thread with a small queue (maxsize=2 allows 
             # one batch to be ready while the current one is being processed)
-            queue = Queue(maxsize=2)
+            queue = Queue(maxsize=4)
             t = Thread(target=batch_producer, args=(data, slicers, self.batch_size, queue))
             t.start()
 
