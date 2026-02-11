@@ -366,7 +366,7 @@ class BatchedSpeedyPredictor(SpeedyPredictor):
 
             # Set up the producer thread with a small queue (maxsize=2 allows 
             # one batch to be ready while the current one is being processed)
-            queue = Queue(maxsize=4)
+            queue = Queue(maxsize=2)
             t = Thread(target=batch_producer, args=(data, slicers, self.batch_size, queue))
             t.start()
 
