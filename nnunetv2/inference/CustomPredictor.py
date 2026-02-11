@@ -359,7 +359,12 @@ class BatchedSpeedyPredictor(nnUNetPredictor):
                     # nnU-Net handles batches correctly in this method (flipping the whole batch).
                     with torch.autocast(self.device.type, enabled=True) if self.device.type == 'cuda' else dummy_context():
                         # [0] because it returns a tuple, usually (prediction, None)
-                        prediction = self._internal_maybe_mirror_and_predict(batch)[0]
+                        prediction = self._internal_maybe_mirror_and_predict(batch)
+                        # --- CRITICAL FIX START ---
+                        # Handle both Tuple (standard nnUNet) and Tensor (our override) returns
+                        if isinstance(prediction, (tuple, list)):
+                            prediction = prediction[0]
+                        # --- CRITICAL FIX END ---
                     
                     # Move prediction to result device (if different from GPU)
                     prediction = prediction.to(results_device)
