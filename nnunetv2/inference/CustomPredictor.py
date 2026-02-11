@@ -363,15 +363,19 @@ class BatchedSpeedyPredictor(nnUNetPredictor):
                     # Move prediction to result device (if different from GPU)
                     prediction = prediction.to(results_device)
 
-                    # Accumulate results for the batch
+                    # Accumulate results
                     for j, sl in enumerate(batch_slicers):
-                        # Apply Gaussian
+                        # FIX: Do NOT use in-place (*=) on the view. 
+                        # This avoids forcing the calculation back into fp16 immediately, 
+                        # which causes underflow (zeros) at the gaussian edges.
                         pred_patch = prediction[j]
                         if self.use_gaussian:
-                            pred_patch *= self.gaussian
+                            pred_patch = pred_patch * self.gaussian
                             
                         predicted_logits[sl] += pred_patch
                         n_predictions[sl[1:]] += self.gaussian
+
+                    pbar.update(len(batch_slicers))
 
                     pbar.update(len(batch_slicers))
 
