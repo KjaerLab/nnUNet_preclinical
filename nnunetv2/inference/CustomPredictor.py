@@ -294,7 +294,7 @@ class BatchedSpeedyPredictor(nnUNetPredictor):
 
         ############################## Change allowed mirroring ###############################
         if self.only_zy_flips:
-            self.allowed_mirroring_axes = [0,1]
+            self.allowed_mirroring_axes = [0,2]
         else:
             self.allowed_mirroring_axes = inference_allowed_mirroring_axes 
         #######################################################################################
@@ -305,6 +305,7 @@ class BatchedSpeedyPredictor(nnUNetPredictor):
                 and not isinstance(self.network, OptimizedModule):
             print('Using torch.compile')
             self.network = torch.compile(self.network)
+
 
     @torch.inference_mode()
     def _internal_predict_sliding_window_return_logits(self,
@@ -365,17 +366,22 @@ class BatchedSpeedyPredictor(nnUNetPredictor):
 
                     # Accumulate results
                     for j, sl in enumerate(batch_slicers):
-                        # FIX: Do NOT use in-place (*=) on the view. 
-                        # This avoids forcing the calculation back into fp16 immediately, 
-                        # which causes underflow (zeros) at the gaussian edges.
+                        # sl is (slice(0, C), slice(Z), slice(Y), slice(X))
+                        # We need to ignore the Channel slice [0] and use only Spatial slices [1:]
+                        spatial_slices = sl[1:] 
+                        
+                        # Construct a new slicer for the logits: (All Classes, Z, Y, X)
+                        logit_slices = (slice(None), *spatial_slices)
+
                         pred_patch = prediction[j]
+                        
                         if self.use_gaussian:
+                            # OUT-OF-PLACE multiplication to avoid zeroing small values
                             pred_patch = pred_patch * self.gaussian
                             
-                        predicted_logits[sl] += pred_patch
-                        n_predictions[sl[1:]] += self.gaussian
-
-                    pbar.update(len(batch_slicers))
+                        # Write to the correct location
+                        predicted_logits[logit_slices] += pred_patch
+                        n_predictions[spatial_slices] += self.gaussian
 
                     pbar.update(len(batch_slicers))
 
