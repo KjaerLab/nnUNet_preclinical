@@ -393,3 +393,42 @@ class BatchedSpeedyPredictor(nnUNetPredictor):
             empty_cache(results_device)
             raise e
         return predicted_logits
+
+    @torch.inference_mode()
+    def _internal_maybe_mirror_and_predict(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        x: [Batch, Channels, Z, Y, X] (5D) or [Batch, Channels, Y, X] (4D)
+        """
+        mirror_axes = self.allowed_mirroring_axes if self.use_mirroring else None
+        
+        # Initial forward pass
+        prediction = self.network(x)
+
+        if mirror_axes is not None:
+            # Spatial axes start after Batch and Channel dimensions (index 2 onwards)
+            # For 3D: Batch=0, Channel=1, Z=2, Y=3, X=4. Spatial axes = [2, 3, 4]
+            # For 2D: Batch=0, Channel=1, Y=2, X=3. Spatial axes = [2, 3]
+            
+            # Shift axes to start at 2
+            actual_mirror_axes = [m + 2 for m in mirror_axes]
+            
+            # Generate all combinations of flips (e.g., X, Y, XY...)
+            axes_combinations = [
+                c for i in range(len(actual_mirror_axes)) 
+                for c in itertools.combinations(actual_mirror_axes, i + 1)
+            ]
+            
+            for axes in axes_combinations:
+                # 1. Flip input batch spatially
+                flipped_x = torch.flip(x, dims=axes)
+                
+                # 2. Predict on flipped batch
+                flipped_pred = self.network(flipped_x)
+                
+                # 3. Flip prediction back and accumulate
+                prediction += torch.flip(flipped_pred, dims=axes)
+                
+            # Average the predictions
+            prediction /= (len(axes_combinations) + 1)
+            
+        return prediction
