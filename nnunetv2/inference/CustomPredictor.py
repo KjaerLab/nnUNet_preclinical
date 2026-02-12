@@ -444,4 +444,4 @@ class BatchedSpeedyPredictor(SpeedyPredictor):
             empty_cache(self.device)
             empty_cache(results_device)
             raise e
-        return predicted_logits
+        return predicted_logits.to(dtype=torch.half, device='cpu')
