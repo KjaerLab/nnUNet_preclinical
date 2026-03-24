@@ -823,6 +823,9 @@ def predict_entry_point_modelfolder():
     parser.add_argument('--disable_progress_bar', action='store_true', required=False, default=False,
                         help='Set this flag to disable progress bar. Recommended for HPC environments (non interactive '
                              'jobs)')
+    parser.add_argument('--not_on_device', action='store_true', required=False, default=False,
+                        help="Set this flag to disable perform_everything_on_device. Recommended for large cases that "
+                             "occupy more VRAM than available")
 
     print(
         "\n#######################################################################\nPlease cite the following paper "
@@ -855,7 +858,7 @@ def predict_entry_point_modelfolder():
     predictor = nnUNetPredictor(tile_step_size=args.step_size,
                                 use_gaussian=True,
                                 use_mirroring=not args.disable_tta,
-                                perform_everything_on_device=True,
+                                perform_everything_on_device=not args.not_on_device,
                                 device=device,
                                 verbose=args.verbose,
                                 allow_tqdm=not args.disable_progress_bar,
@@ -932,6 +935,9 @@ def predict_entry_point():
     parser.add_argument('--disable_progress_bar', action='store_true', required=False, default=False,
                         help='Set this flag to disable progress bar. Recommended for HPC environments (non interactive '
                              'jobs)')
+    parser.add_argument('--not_on_device', action='store_true', required=False, default=False,
+                        help="Set this flag to disable perform_everything_on_device. Recommended for large cases that "
+                             "occupy more VRAM than available")
 
     print(
         "\n#######################################################################\nPlease cite the following paper "
@@ -969,7 +975,7 @@ def predict_entry_point():
     predictor = nnUNetPredictor(tile_step_size=args.step_size,
                                 use_gaussian=True,
                                 use_mirroring=not args.disable_tta,
-                                perform_everything_on_device=True,
+                                perform_everything_on_device=not args.not_on_device,
                                 device=device,
                                 verbose=args.verbose,
                                 verbose_preprocessing=args.verbose,
